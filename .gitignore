@@ -1,0 +1,14 @@
+ai_context
+
+.venv
+.env
+
+.python-version
+
+__pycache__
+*/__pycache__
+*/*/__pycache__
+*/*/*/__pycache__
+*/*/*/*/__pycache__
+*/*/*/*/*/__pycache__
+
