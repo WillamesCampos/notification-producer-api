@@ -1,15 +1,14 @@
 import logging
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    kafka_broker_url: str
-    kafka_bootstrap_servers: list[str]
-
+    kafka_bootstrap_servers: list[str] = ["kafka:9092"]
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True,
+        case_sensitive=False,
         extra="ignore"
     )
 

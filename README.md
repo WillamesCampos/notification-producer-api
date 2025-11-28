@@ -20,6 +20,7 @@ Sistema de notificações distribuído baseado em arquitetura de microserviços 
 - [Instalação e Execução](#-instalação-e-execução)
 - [API Endpoints](#-api-endpoints)
 - [Formato dos Eventos](#-formato-dos-eventos)
+- [Aprendizado](#-aprendizado)
 - [Variáveis de Ambiente](#-variáveis-de-ambiente)
 - [Comandos Úteis](#-comandos-úteis)
 - [Roadmap](#-roadmap)
@@ -339,6 +340,207 @@ Os eventos publicados no Kafka seguem o seguinte schema JSON:
 - `comment.added` - Comentário adicionado
 - `user.mentioned` - Usuário mencionado
 - `notification.sent` - Notificação enviada
+
+---
+
+## 📚 Aprendizado
+
+Esta seção documenta os conceitos e padrões implementados no projeto, úteis para entender como o sistema funciona e para referência futura.
+
+### Kafka Producer
+
+#### Como conectar ao Kafka de dentro do FastAPI
+
+O Kafka Producer é inicializado usando o **lifespan** do FastAPI, garantindo que a conexão seja estabelecida na inicialização da aplicação e fechada corretamente no shutdown.
+
+**Implementação:**
+
+```python
+from contextlib import asynccontextmanager
+from aiokafka import AIOKafkaProducer
+
+_producer: Optional[AIOKafkaProducer] = None
+
+async def init_kafka_producer() -> AIOKafkaProducer:
+    global _producer
+    _producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    )
+    await _producer.start()
+    return _producer
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_kafka_producer()  # Startup
+    yield
+    await close_kafka_producer()  # Shutdown
+
+app = FastAPI(lifespan=lifespan)
+```
+
+**Pontos importantes:**
+- Usa `aiokafka` para operações assíncronas não-bloqueantes
+- `value_serializer` converte automaticamente dicts para JSON bytes
+- Retry logic implementado para aguardar Kafka estar pronto
+- Conexão global (`_producer`) reutilizada em todas as requisições
+
+#### Como publicar eventos em um tópico
+
+A publicação de eventos é feita de forma assíncrona usando `send_and_wait`, que garante que a mensagem foi commitada no Kafka antes de retornar.
+
+**Implementação:**
+
+```python
+async def publish_event(topic: str, event: dict) -> None:
+    if _producer is None:
+        raise RuntimeError("Kafka producer not initialized")
+    
+    record_metadata = await _producer.send_and_wait(
+        topic=topic,
+        value=event  # value_serializer serializa automaticamente
+    )
+    # record_metadata contém: partition, offset, timestamp
+```
+
+**Características:**
+- `send_and_wait` garante que a mensagem foi persistida (acks=all)
+- Retorna `RecordMetadata` com informações de partição e offset
+- Tratamento de erros com logging estruturado
+
+### Tópico (Topic)
+
+#### O que é um Tópico?
+
+Um **tópico** é um canal lógico onde eventos são publicados e consumidos. É similar a uma fila ou categoria de mensagens.
+
+**No nosso caso:**
+- **Nome do tópico**: `notifications`
+- **Partições**: 1 (configurável)
+- **Replicação**: 1 (para desenvolvimento)
+
+**Características:**
+- Tópicos são criados automaticamente na primeira publicação (se `auto.create.topics.enable=true`)
+- Mensagens são ordenadas dentro de cada partição
+- Múltiplos consumidores podem ler do mesmo tópico (consumer groups)
+
+**Comandos úteis:**
+```bash
+# Listar tópicos
+docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --list
+
+# Descrever tópico
+docker exec -it kafka kafka-topics --bootstrap-server kafka:9092 --describe --topic notifications
+
+# Verificar offsets (quantidade de mensagens)
+docker exec -it kafka kafka-run-class kafka.tools.GetOffsetShell --broker-list kafka:9092 --topic notifications
+```
+
+### Evento
+
+#### Estrutura de um Evento
+
+Todos os eventos publicados no Kafka seguem uma estrutura JSON padronizada:
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "event_type": "notification.created",
+  "user_id": "user-123",
+  "timestamp": "2024-01-15T10:30:00.123456Z",
+  "payload": {
+    "notification_title": "Nova mensagem",
+    "priority": "high"
+  }
+}
+```
+
+#### Campos do Evento
+
+| Campo | Tipo | Descrição | Gerado Por |
+|-------|------|-----------|------------|
+| `event_id` | UUID v4 | Identificador único do evento | Sistema (auto) |
+| `event_type` | string | Tipo do evento (ex: `notification.created`) | Cliente |
+| `user_id` | string | ID do usuário relacionado | Cliente |
+| `timestamp` | ISO 8601 | Data/hora UTC do evento | Sistema (auto) |
+| `payload` | object | Dados específicos do evento | Cliente |
+
+**Geração automática:**
+- `event_id`: Gerado com `uuid.uuid4()` na criação do evento
+- `timestamp`: Gerado com `datetime.utcnow().isoformat()` no momento da publicação
+
+**Exemplo de criação:**
+```python
+import uuid
+from datetime import datetime
+
+event = {
+    "event_id": str(uuid.uuid4()),
+    "event_type": request.event_type,
+    "user_id": request.user_id,
+    "payload": request.payload,
+    "timestamp": datetime.utcnow().isoformat(),
+}
+```
+
+### Lifespan do FastAPI
+
+#### O que é Lifespan?
+
+O **lifespan** é um context manager assíncrono do FastAPI que permite executar código durante o ciclo de vida da aplicação:
+- **Startup**: Código executado quando a aplicação inicia
+- **Shutdown**: Código executado quando a aplicação para
+
+#### Por que usar Lifespan?
+
+É a forma recomendada de gerenciar recursos que devem durar durante toda a vida da aplicação:
+- Conexões com bancos de dados
+- Clientes de message brokers (Kafka, RabbitMQ)
+- Pools de conexões
+- Cache em memória
+
+#### Implementação no Projeto
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Executado quando a aplicação inicia
+    await init_kafka_producer()
+    logger.info("🚀 Application started")
+    
+    yield  # A aplicação roda aqui
+    
+    # SHUTDOWN: Executado quando a aplicação para
+    await close_kafka_producer()
+    logger.info("🛑 Application stopped")
+
+app = FastAPI(
+    title="Notification Producer API",
+    lifespan=lifespan  # Conecta o lifespan ao app
+)
+```
+
+**Fluxo de execução:**
+1. `docker-compose up` → Container inicia
+2. Uvicorn inicia → FastAPI carrega
+3. **Lifespan startup** → `init_kafka_producer()` é chamado
+4. Aplicação fica disponível → Endpoints respondem
+5. `docker-compose down` → Container para
+6. **Lifespan shutdown** → `close_kafka_producer()` é chamado
+
+**Vantagens:**
+- Garante que recursos são liberados corretamente
+- Evita memory leaks
+- Permite inicialização assíncrona de dependências
+- Código organizado e testável
+
+**Alternativas (não recomendadas):**
+- ❌ `@app.on_event("startup")` e `@app.on_event("shutdown")` (deprecated)
+- ❌ Inicializar no primeiro request (lento, pode falhar silenciosamente)
+- ❌ Inicializar no nível de módulo (não funciona com async)
 
 ---
 
