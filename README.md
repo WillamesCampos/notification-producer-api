@@ -1,6 +1,6 @@
 <div align="center">
   <img width="250" height="250" alt="Flix API Logo" src="https://github.com/user-attachments/assets/5460ba01-9b90-4958-9c70-2b2bf8393470" />
-" />
+
 </div>
 
 # 🔔 Notification System
