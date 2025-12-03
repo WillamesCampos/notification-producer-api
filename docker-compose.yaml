@@ -94,6 +94,31 @@ services:
       start_period: 30s
 
 #===============================================================
+# Notification Service
+#===============================================================
+  notification-service:
+    build:
+      context: ./notification-system/services/notification-service
+      dockerfile: Dockerfile
+    container_name: notification-service-service
+    ports:
+      - "8002:8002"
+    networks:
+      - notification-network
+    depends_on:
+      - kafka
+      - mongodb
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: '["kafka:9092"]'
+      KAFKA_GROUP_ID: notification-service
+      KAFKA_TOPIC: notifications
+      MONGODB_URI: mongodb://root:password@mongodb:27017
+      MONGODB_DATABASE: notification_db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+
+#===============================================================
 volumes:
   mongodb_data:
 
